@@ -835,6 +835,30 @@ test("a raw __proto__ input key stays skipped in loose mode", () => {
   expect(Object.prototype.hasOwnProperty.call(parsed, "__proto__")).toBe(false);
 });
 
+test("validates an undeclared __proto__ key like any other key (#6641)", () => {
+  // a non-enumerable key schema runs against __proto__ and reports it like any other failing key
+  const strict = z.record(
+    z.string().refine((k) => k === "fr"),
+    z.string()
+  );
+  const strictResult = strict.safeParse(JSON.parse('{"__proto__":"x","fr":"y"}'));
+  expect(strictResult.success).toBe(false);
+  if (!strictResult.success)
+    expect(strictResult.error.issues).toMatchObject([{ code: "invalid_key", path: ["__proto__"] }]);
+
+  // an enumerable key schema reports it as unrecognized, matching the exhaustive path
+  const partial = z.partialRecord(z.enum(["a", "b"]), z.string());
+  const partialResult = partial.safeParse(JSON.parse('{"__proto__":"x","a":"y"}'));
+  expect(partialResult.success).toBe(false);
+  if (!partialResult.success)
+    expect(partialResult.error.issues).toMatchObject([{ code: "unrecognized_keys", keys: ["__proto__"] }]);
+
+  // a key schema that accepts it still strips it from the output without touching the prototype
+  const parsed: any = z.record(z.string(), z.string()).parse(JSON.parse('{"__proto__":"x","fr":"y"}'));
+  expect(parsed).toEqual({ fr: "y" });
+  expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+});
+
 test("partialRecord strips a declared __proto__ key", () => {
   const schema = z.partialRecord(z.enum(["__proto__", "b"]), z.string());
   const parsed: any = schema.parse(Object.fromEntries([["__proto__", "declared"]]));

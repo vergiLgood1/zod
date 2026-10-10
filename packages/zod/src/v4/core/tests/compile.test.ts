@@ -1565,8 +1565,14 @@ test("record key schemas compile: formats, checks, numbers, transforms", () => {
     for (const input of inputs) expectMatch(schema, input);
   }
 
-  // Own __proto__ is skipped rather than validated, matching the runtime.
-  expectMatch(z.record(z.email(), z.number()), JSON.parse('{"__proto__":{"p":1},"a@b.com":1}'));
+  // An own __proto__ is validated like any other key (#6641): a key schema it fails rejects it, and one it passes drops it without writing through the prototype setter.
+  const protoInput = JSON.parse('{"__proto__":{"p":1},"a@b.com":1}');
+  const rejectsProto = z.record(z.email(), z.number());
+  expectMatch(rejectsProto, protoInput);
+  invalid(rejectsProto, protoInput);
+  const dropsProto = z.record(z.string().min(2), z.number());
+  expectMatch(dropsProto, protoInput);
+  expect(valid(dropsProto, protoInput)).toEqual({ "a@b.com": 1 });
 
   // Coercion is modelled nowhere, so a coercing key schema is refused outright rather than compiled to the bare type test it would otherwise become.
   expect(() => compile(z.record(z.coerce.string(), z.number()), { strict: true })).toThrow(ZodCompileUnsupportedError);

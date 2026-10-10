@@ -2006,6 +2006,8 @@ function generateRecordCheck(doc: Doc, ctx: CompileContext, schema: SomeType, ac
   const keyDef = def.keyType._zod.def as { type: string; format?: string; coerce?: boolean; checks?: unknown[] };
   const keyIsBareString =
     keyDef.type === "string" && keyDef.format === undefined && !keyDef.coerce && (keyDef.checks?.length ?? 0) === 0;
+  // A key schema carrying a value set can declare __proto__; that key is stripped before the schema runs (#6386), while an undeclared one is validated like any other key (#6641). `keyValues` above is gated on `partial`, so read the raw set.
+  const declaresProto = (def.keyType._zod as unknown as { values?: Set<unknown> }).values?.has("__proto__") ?? false;
   if (!keyIsBareString) {
     // A key schema with no value set is a constraint every key must satisfy
     // (`z.email()`, `z.string().min(3)`, `z.number()`, a template literal).
@@ -2020,26 +2022,36 @@ function generateRecordCheck(doc: Doc, ctx: CompileContext, schema: SomeType, ac
     const outKeyVar = newVar(ctx);
 
     // the body runs once per string key and once per symbol key, since a key schema can accept symbols
-    emitOwnKeys(doc, ctx, accessor, kVar, (d) => {
-      d.write(`let ${outKeyVar} = ${keyFast}(${kVar});`);
-      // Numeric-string retry, mirroring the runtime: a key the schema rejects as a string is tried again as a number, so z.record(z.number(), …) matches the numeric keys JavaScript stringified on the way in.
-      d.write(
-        `if (${outKeyVar} === INVALID && typeof ${kVar} === "string" && ${numericConst}.test(${kVar})) ${outKeyVar} = ${keyFast}(Number(${kVar}));`
-      );
-      if (isLoose) {
-        // A loose record keeps a key its schema rejects, copying the value across unvalidated rather than failing the parse.
-        d.write(`if (${outKeyVar} === INVALID) { ${outputVar}[${kVar}] = ${accessor}[${kVar}]; continue; }`);
-      } else {
-        d.write(`if (${outKeyVar} === INVALID) return INVALID;`);
-      }
-      // The guard above tested the input key, but the schema can normalize an ordinary key into __proto__; re-check the one actually written under.
-      d.write(`if (${outKeyVar} === "__proto__") continue;`);
-      // Read once: the raw expression would be evaluated again by the output write below, so an accessor could return an unvalidated second value.
-      const valueVar = newVar(ctx);
-      d.write(`const ${valueVar} = ${accessor}[${kVar}];`);
-      const valOutput = compileChild(d, ctx, def.valueType, valueVar);
-      d.write(`${outputVar}[${outKeyVar}] = ${valOutput};`);
-    });
+    emitOwnKeys(
+      doc,
+      ctx,
+      accessor,
+      kVar,
+      (d) => {
+        d.write(`let ${outKeyVar} = ${keyFast}(${kVar});`);
+        // Numeric-string retry, mirroring the runtime: a key the schema rejects as a string is tried again as a number, so z.record(z.number(), …) matches the numeric keys JavaScript stringified on the way in.
+        d.write(
+          `if (${outKeyVar} === INVALID && typeof ${kVar} === "string" && ${numericConst}.test(${kVar})) ${outKeyVar} = ${keyFast}(Number(${kVar}));`
+        );
+        if (isLoose) {
+          // A loose record keeps a rejected key verbatim, but an own __proto__ can't be assigned onto the plain {} output without replacing its prototype (#6641).
+          d.write(
+            `if (${outKeyVar} === INVALID) { if (${kVar} !== "__proto__") ${outputVar}[${kVar}] = ${accessor}[${kVar}]; continue; }`
+          );
+        } else {
+          d.write(`if (${outKeyVar} === INVALID) return INVALID;`);
+        }
+        // An own __proto__ is validated above like any other key but never written; the schema can also normalize an ordinary key into __proto__ (#6641).
+        d.write(`if (${outKeyVar} === "__proto__") continue;`);
+        // Read once: the raw expression would be evaluated again by the output write below, so an accessor could return an unvalidated second value.
+        const valueVar = newVar(ctx);
+        d.write(`const ${valueVar} = ${accessor}[${kVar}];`);
+        const valOutput = compileChild(d, ctx, def.valueType, valueVar);
+        d.write(`${outputVar}[${outKeyVar}] = ${valOutput};`);
+      },
+      undefined,
+      declaresProto
+    );
     return outputVar;
   }
 
@@ -2067,7 +2079,8 @@ function emitOwnKeys(
   accessor: string,
   kVar: string,
   body: (d: Doc) => void,
-  onSymbol?: string
+  onSymbol?: string,
+  skipProto = true
 ): void {
   const propIsEnumerableConst = addConstant(ctx, Object.prototype.propertyIsEnumerable);
   const symsVar = newVar(ctx);
@@ -2078,7 +2091,12 @@ function emitOwnKeys(
   doc.write(`for (let ${iVar} = 0; ${iVar} < ${keysVar}.length; ${iVar}++) {`);
   doc.indented((d) => {
     d.write(`const ${kVar} = ${keysVar}[${iVar}];`);
-    d.write(`if (${kVar} === "__proto__" || !${propIsEnumerableConst}.call(${accessor}, ${kVar})) continue;`);
+    // a record's key schema has to see an own __proto__, so `skipProto: false` leaves it to the body (#6641)
+    d.write(
+      `if (${
+        skipProto ? `${kVar} === "__proto__" || ` : ""
+      }!${propIsEnumerableConst}.call(${accessor}, ${kVar})) continue;`
+    );
     body(d);
   });
   doc.write(`}`);

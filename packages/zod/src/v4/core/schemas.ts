@@ -3360,7 +3360,8 @@ export const $ZodRecord: core.$constructor<$ZodRecord> = /*@__PURE__*/ core.$con
       let unrecognized!: string[];
       // Reflect.ownKeys for Symbol-key support; filter non-enumerable to match z.object()
       for (const key of Reflect.ownKeys(input)) {
-        if (key === "__proto__") continue;
+        // a key schema that declares __proto__ has it stripped before the schema runs (#6386); an undeclared one is validated like any other key (#6641)
+        if (key === "__proto__" && values?.has(key)) continue;
         if (!Object.prototype.propertyIsEnumerable.call(input, key)) continue;
         let keyResult = def.keyType._zod.run({ value: key, issues: [] }, ctx);
         if (keyResult instanceof Promise) {
@@ -3381,8 +3382,8 @@ export const $ZodRecord: core.$constructor<$ZodRecord> = /*@__PURE__*/ core.$con
 
         if (keyResult.issues.length) {
           if (def.mode === "loose") {
-            // Pass through unchanged
-            payload.value[key] = input[key];
+            // an own __proto__ is dropped rather than copied through like every other rejected key: assignment would replace the output prototype (#6641)
+            if (key !== "__proto__") payload.value[key] = input[key];
           } else if (values) {
             unrecognized = unrecognized ?? [];
             unrecognized.push(key as string);
@@ -3400,7 +3401,7 @@ export const $ZodRecord: core.$constructor<$ZodRecord> = /*@__PURE__*/ core.$con
           continue;
         }
 
-        // the guard above tests the raw input key, but the key schema can normalize an ordinary key into __proto__; re-check the key we actually write under
+        // an own __proto__ that passes the key schema is still never written, and a key schema can also normalize an ordinary key into __proto__
         const outKey = keyResult.value as PropertyKey;
         if (outKey === "__proto__") continue;
 

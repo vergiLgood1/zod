@@ -406,6 +406,25 @@ test("record dynamic key rejects enumerable symbol keys", () => {
   differential(z.record(z.string(), z.number()), [input]);
 });
 
+test("record key schema validates an undeclared __proto__ key (#6641)", () => {
+  // __proto__ fails the key schema below → rejected; passes the one above → dropped from the output without writing through the setter
+  differential(z.record(z.string().min(2), z.number()), [
+    { ab: 1, xy: 2 },
+    JSON.parse('{"ab":1,"__proto__":{"p":1}}'),
+    JSON.parse('{"x":1,"__proto__":{"p":1}}'),
+  ]);
+});
+
+test("record strips a declared __proto__ before the key schema runs (#6386, #6641)", () => {
+  differential(
+    z.partialRecord(
+      z.literal("__proto__").transform(() => "safe" as const),
+      z.string()
+    ),
+    [Object.fromEntries([["__proto__", "value"]]), { b: "x" }]
+  );
+});
+
 test("record enum key", () => {
   differential(z.record(z.enum(["a", "b"]), z.number()), [{ a: 1, b: 2 }, { a: 1, c: 3 }, {}]);
 });
